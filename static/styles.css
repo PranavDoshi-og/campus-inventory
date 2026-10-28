@@ -201,6 +201,21 @@ textarea.field { min-height: 75px; resize: vertical; }
 .quick-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
 .quick-card strong { display: block; font-size: 11px; }
 .quick-card span { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.checkin-layout { display: grid; grid-template-columns: minmax(240px,.85fr) minmax(0,1.15fr); align-items: stretch; gap: 14px; }
+.checkin-form { padding: 21px; }
+.checkin-form > p { margin: 4px 0 17px; }
+.checkin-code { min-height: 48px; font: 700 16px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 2px; text-transform: uppercase; }
+.checkin-code::placeholder { color: #b6bdb5; }
+.checkin-result { min-height: 235px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 27px; text-align: center; }
+.checkin-result-icon { width: 52px; height: 52px; display: grid; place-items: center; margin-bottom: 12px; border-radius: 16px; background: var(--green-soft); color: var(--green); }
+.checkin-result-icon svg { width: 27px; height: 27px; }
+.checkin-result h2 { margin: 12px 0 5px; font-size: 16px; font-weight: 800; }
+.checkin-result p { max-width: 350px; margin: 0; color: var(--muted); font-size: 11px; }
+.checkin-result.success { border-color: #cee3d1; background: #fcfffc; }
+.checkin-result.success h2 { color: var(--green-dark); }
+.checkin-result-icon.error { background: var(--red-soft); color: var(--red); }
+.checkin-result .verified-code { display: inline-block; margin-left: 4px; padding: 3px 6px; border-radius: 5px; background: var(--green-soft); color: var(--green-dark); font: 700 10px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 1px; }
+.checkin-time { margin-top: 9px !important; font-size: 10px !important; }
 .loading { min-height: 180px; display: grid; place-items: center; color: var(--muted); font-size: 12px; }
 .error-panel { padding: 20px; border: 1px solid #f0d7d4; border-radius: 12px; background: #fff; color: var(--red); font-size: 12px; }
 .toast { position: fixed; right: 19px; bottom: 19px; z-index: 5; max-width: min(380px,calc(100vw - 32px)); padding: 12px 15px; border: 1px solid var(--line); border-radius: 11px; background: #fff; box-shadow: var(--shadow); color: var(--ink); font-size: 11px; }
@@ -245,6 +260,7 @@ textarea.field { min-height: 75px; resize: vertical; }
   .filters { flex: 1 0 auto; justify-content: space-around; }
   .filter { padding: 0 8px; }
   .layout-two { grid-template-columns: 1fr; }
+  .checkin-layout { grid-template-columns: 1fr; }
   .quick-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
 @media (max-width: 430px) {

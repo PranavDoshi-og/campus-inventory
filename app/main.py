@@ -19,6 +19,7 @@ FRONTEND_ROUTES = {
     "/organizer",
     "/organizer/inventory",
     "/organizer/orders",
+    "/organizer/check-in",
     "/organizer/alerts",
     "/organizer/reports",
 }

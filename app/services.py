@@ -128,7 +128,11 @@ async def place_order(item_id, user: dict, qty: int) -> dict:
 
 async def cancel_order(order_id, user: dict) -> dict:
     db = database.db
-    filt = {"_id": order_id, "status": "confirmed"}
+    filt = {
+        "_id": order_id,
+        "status": "confirmed",
+        "used_ticket_codes": {"$exists": False},
+    }
     if user["role"] != "organizer":
         filt["buyer_id"] = user["_id"]
     # Atomic state transition: only one cancel can ever win.
@@ -150,3 +154,38 @@ async def cancel_order(order_id, user: dict) -> dict:
     if item:
         await emit_stock_update(item)
     return order
+
+
+async def check_in_ticket(ticket_code: str) -> dict:
+    """Atomically redeem one confirmed ticket code exactly once."""
+    now = utcnow()
+    order = await database.db.orders.find_one_and_update(
+        {
+            "ticket_codes": ticket_code,
+            "kind": "ticket",
+            "status": "confirmed",
+            "used_ticket_codes": {"$ne": ticket_code},
+        },
+        {
+            "$addToSet": {"used_ticket_codes": ticket_code},
+            "$set": {"last_checked_in_at": now},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if order:
+        return {
+            "checked_in": True,
+            "ticket_code": ticket_code,
+            "item_name": order["item_name"],
+            "order_id": str(order["_id"]),
+            "checked_in_at": now,
+        }
+
+    existing = await database.db.orders.find_one(
+        {"ticket_codes": ticket_code, "kind": "ticket"}
+    )
+    if not existing or existing.get("status") != "confirmed":
+        raise HTTPException(404, "Ticket code not found or order is not active")
+    if ticket_code in existing.get("used_ticket_codes", []):
+        raise HTTPException(409, "Ticket has already been checked in")
+    raise HTTPException(409, "Ticket could not be checked in; please try again")

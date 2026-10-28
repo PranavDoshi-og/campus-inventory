@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends
 
 from .. import database
 from ..deps import buyer_only, current_user, organizer_only
-from ..schemas import OrderIn
-from ..services import cancel_order, place_order
+from ..schemas import OrderIn, TicketCheckInIn
+from ..services import cancel_order, check_in_ticket, place_order
 from ..utils import oid, ser
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -26,6 +26,11 @@ async def all_orders(item_id: str | None = None, _: dict = Depends(organizer_onl
     q = {"item_id": oid(item_id)} if item_id else {}
     docs = await database.db.orders.find(q).sort("created_at", -1).to_list(500)
     return [ser(d) for d in docs]
+
+
+@router.post("/check-in", tags=["ticketing"])
+async def ticket_check_in(body: TicketCheckInIn, _: dict = Depends(organizer_only)):
+    return await check_in_ticket(body.ticket_code.upper())
 
 
 @router.post("/{order_id}/cancel")

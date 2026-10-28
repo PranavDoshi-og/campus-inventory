@@ -9,6 +9,7 @@ const ROUTES = {
   "/organizer": { title: "Overview", roles: ["organizer"] },
   "/organizer/inventory": { title: "Inventory", roles: ["organizer"] },
   "/organizer/orders": { title: "All orders", roles: ["organizer"] },
+  "/organizer/check-in": { title: "Ticket check-in", roles: ["organizer"] },
   "/organizer/alerts": { title: "Stock alerts", roles: ["organizer"] },
   "/organizer/reports": { title: "Reports", roles: ["organizer"] }
 };
@@ -20,6 +21,7 @@ const ORGANIZER_NAV = [
   ["/organizer", "Overview", "grid"],
   ["/organizer/inventory", "Inventory", "box"],
   ["/organizer/orders", "Orders", "receipt"],
+  ["/organizer/check-in", "Ticket check-in", "ticketCheckin"],
   ["/organizer/alerts", "Alerts", "bell"],
   ["/organizer/reports", "Reports", "chart"]
 ];
@@ -27,6 +29,7 @@ const ICONS = {
   grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>',
   box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 8 9 5 9-5M3 8v9l9 5 9-5V8m-9 5v9"/></svg>',
   receipt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14v18l-3-2-4 2-4-2-3 2V3Z"/><path d="M9 8h6m-6 4h6m-6 4h3"/></svg>',
+  ticketCheckin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8a3 3 0 0 0 0 6v3h16v-3a3 3 0 0 1 0-6V5H4v3Z"/><path d="M14 5v2m0 4v2m0 4v2"/></svg>',
   bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9m-8 12h4"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V4m0 16h17"/><path d="m7 15 4-4 3 2 6-7"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4 4"/></svg>',
@@ -422,6 +425,21 @@ async function renderAlerts() {
   return `<div class="section-heading"><div><h2>A little heads-up</h2><p>Live stock alerts so nothing catches you off guard.</p></div><span class="status-pill ${pending ? "warning" : ""}">${pending} unread</span></div>
     <section class="panel">${alertRowsMarkup(alerts)}</section>`;
 }
+function renderTicketCheckIn() {
+  return `<div class="section-heading"><div><h2>Welcome them in</h2><p>Enter the eight-character code from a ticket to check a guest in. Each code works once.</p></div></div>
+    <div class="checkin-layout">
+      <form class="panel form-panel checkin-form" id="ticket-checkin-form">
+        <h2>Check in a ticket</h2><p>Ticket codes are printed on the buyer's order confirmation.</p>
+        <label><span class="field-label compact-label" for="ticket-code">Ticket code</span><input class="field checkin-code" id="ticket-code" name="ticket_code" minlength="8" maxlength="8" pattern="[A-Fa-f0-9]{8}" placeholder="A1B2C3D4" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+        <p id="ticket-checkin-error" class="form-error" role="alert" hidden></p>
+        <button class="button button-block" type="submit">Verify &amp; check in</button>
+      </form>
+      <section id="ticket-checkin-result" class="panel checkin-result" aria-live="polite">
+        <div class="checkin-result-icon">${ICONS.ticket}</div><h2>Ready when you are</h2>
+        <p>Verify a ticket code to see the event details and confirm your guest's entry.</p>
+      </section>
+    </div>`;
+}
 async function renderReports() {
   const report = await api("/reports/summary");
   const top = Array.isArray(report.by_item) ? report.by_item : [];
@@ -472,6 +490,7 @@ async function routeContent(path) {
     case "/organizer": return renderOrganizerHome();
     case "/organizer/inventory": return renderInventory();
     case "/organizer/orders": return renderOrders(true);
+    case "/organizer/check-in": return renderTicketCheckIn();
     case "/organizer/alerts": return renderAlerts();
     case "/organizer/reports": return renderReports();
     default: throw new Error("That page isn't here.");
@@ -671,6 +690,39 @@ async function acknowledgeAlert(button) {
     button.disabled = false;
   }
 }
+async function checkInTicket(form) {
+  const button = form.querySelector('button[type="submit"]');
+  const errorBox = document.getElementById("ticket-checkin-error");
+  const resultBox = document.getElementById("ticket-checkin-result");
+  const ticketCode = form.elements.ticket_code.value.trim().toUpperCase();
+  errorBox.hidden = true;
+  button.disabled = true;
+  button.textContent = "Checking ticket…";
+  try {
+    const result = await api("/orders/check-in", {
+      method: "POST",
+      body: JSON.stringify({ ticket_code: ticketCode })
+    });
+    resultBox.classList.add("success");
+    resultBox.innerHTML = `<div class="checkin-result-icon">${ICONS.ticket}</div>
+      <span class="status-pill">Entry approved</span>
+      <h2>${escapeHtml(result.item_name)}</h2>
+      <p>Ticket <code class="verified-code">${escapeHtml(result.ticket_code)}</code> has been checked in.</p>
+      <p class="checkin-time">${escapeHtml(formatDate(result.checked_in_at, { dateStyle: "medium", timeStyle: "short" }))}</p>`;
+    form.reset();
+    showToast("Ticket checked in. Welcome to the event!");
+  } catch (error) {
+    errorBox.textContent = describeError(error);
+    errorBox.hidden = false;
+    resultBox.classList.remove("success");
+    resultBox.innerHTML = `<div class="checkin-result-icon error">${ICONS.alert}</div>
+      <h2>Not checked in</h2><p>${escapeHtml(describeError(error))}</p>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Verify & check in";
+    form.elements.ticket_code.focus();
+  }
+}
 document.addEventListener("click", event => {
   const link = event.target.closest("a[data-link]");
   if (link && link.origin === location.origin && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
@@ -699,6 +751,9 @@ document.addEventListener("submit", event => {
   } else if (form.id === "create-item-form") {
     event.preventDefault();
     createItem(form);
+  } else if (form.id === "ticket-checkin-form") {
+    event.preventDefault();
+    checkInTicket(form);
   } else if (form.matches(".restock-form")) {
     event.preventDefault();
     adjustStock(form);

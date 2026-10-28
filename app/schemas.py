@@ -43,3 +43,7 @@ class RestockIn(BaseModel):
 class OrderIn(BaseModel):
     item_id: str
     quantity: int = Field(default=1, ge=1, le=20)
+
+
+class TicketCheckInIn(BaseModel):
+    ticket_code: str = Field(min_length=8, max_length=8, pattern=r"^[A-Fa-f0-9]{8}$")

@@ -4,7 +4,8 @@ A real-time tracking application for student-association merchandise logistics
 and event ticketing. Buyers can browse merchandise and events, purchase stock-safe
 orders, retrieve their ticket codes, and track their orders. Committee organizers
 can manage listings and sale windows, adjust inventory, monitor alerts, and view
-sales reports.
+sales reports. On event day, organizers can validate and redeem attendee ticket
+codes from the check-in screen; each code can only be used once.
 
 The FastAPI and MongoDB application uses atomic stock reservations and per-buyer
 purchase limits to handle concurrent flash-sale orders. Live WebSocket updates
@@ -24,7 +25,8 @@ uvicorn app.main:app --reload
 Open `http://localhost:8000/` for the app and `/docs` for the Swagger UI. The
 frontend supports direct links and browser history for `/login`, `/register`,
 `/shop`, `/my-orders`, `/organizer`, `/organizer/inventory`,
-`/organizer/orders`, `/organizer/alerts`, and `/organizer/reports`. The
+`/organizer/orders`, `/organizer/check-in`, `/organizer/alerts`, and
+`/organizer/reports`. The
 `/my-orders` page avoids colliding with the existing `/orders` API endpoint.
 Pages are role-gated in the frontend and protected again by the API.
 
@@ -85,6 +87,7 @@ The hub is in-process; for multiple workers use Redis pub/sub or Mongo change st
 POST /auth/register  /auth/login   GET /auth/me
 GET  /items  /items/{id}           POST /items            PATCH /items/{id}   POST /items/{id}/restock
 POST /orders          GET /orders/me (buyer)   GET /orders (organizer)   POST /orders/{id}/cancel
+POST /orders/check-in (organizer; redeem a ticket code once)
 GET  /alerts          POST /alerts/{id}/ack    GET /reports/summary
 WS   /ws
 ```
