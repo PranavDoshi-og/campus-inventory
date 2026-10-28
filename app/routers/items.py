@@ -51,13 +51,28 @@ async def update_item(item_id: str, body: ItemUpdate, _: dict = Depends(organize
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(422, "No fields to update")
-    for k in ("sale_starts_at", "sale_ends_at"):
+    for k in ("sale_starts_at", "sale_ends_at", "event_date"):
         if k in changes:
             changes[k] = aware(changes[k])
+    filt = {"_id": oid(item_id)}
+    if "sale_starts_at" in changes or "sale_ends_at" in changes:
+        current = await database.db.items.find_one({"_id": oid(item_id)})
+        if not current:
+            raise HTTPException(404, "Item not found")
+        sale_starts_at = changes.get("sale_starts_at", current.get("sale_starts_at"))
+        sale_ends_at = changes.get("sale_ends_at", current.get("sale_ends_at"))
+        if sale_starts_at and sale_ends_at and sale_ends_at <= sale_starts_at:
+            raise HTTPException(422, "sale_ends_at must be after sale_starts_at")
+        if "sale_starts_at" in changes and "sale_ends_at" not in changes:
+            filt["sale_ends_at"] = current.get("sale_ends_at")
+        elif "sale_ends_at" in changes and "sale_starts_at" not in changes:
+            filt["sale_starts_at"] = current.get("sale_starts_at")
     item = await database.db.items.find_one_and_update(
-        {"_id": oid(item_id)}, {"$set": changes}, return_document=ReturnDocument.AFTER
+        filt, {"$set": changes}, return_document=ReturnDocument.AFTER
     )
     if not item:
+        if len(filt) > 1:
+            raise HTTPException(409, "Sale window changed concurrently; reload and try again")
         raise HTTPException(404, "Item not found")
     await emit_stock_update(item)
     return ser(item)

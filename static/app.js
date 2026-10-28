@@ -49,6 +49,7 @@ const state = {
   stockFilter: "all",
   stockSearch: "",
   shopItems: [],
+  inventoryItems: [],
   socketConnected: false
 };
 const root = document.getElementById("root");
@@ -283,6 +284,13 @@ function formatDate(value, options = { dateStyle: "medium" }) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "—" : new Intl.DateTimeFormat(undefined, options).format(date);
 }
+function datetimeLocalValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
 function statusMarkup(status) {
   const value = String(status || "unknown");
   const klass = value === "confirmed" ? "" : value === "cancelled" ? "neutral" : "warning";
@@ -356,7 +364,7 @@ function orderRowsMarkup(orders, organizer = false) {
       : "";
     return `<tr>
       <td><span class="cell-title">${escapeHtml(order.item_name)}</span><span class="cell-subtitle">${escapeHtml(order.sku)}</span>${ticketCodes}</td>
-      ${organizer ? `<td><span class="cell-title">${escapeHtml(order.buyer_id)}</span><span class="cell-subtitle">Buyer ID</span></td>` : ""}
+      ${organizer ? `<td><span class="cell-title">${escapeHtml(order.buyer_name || "Campus buyer")}</span><span class="cell-subtitle">${escapeHtml(order.buyer_email || "")}</span></td>` : ""}
       <td>${escapeHtml(order.quantity)}</td><td>${formatPrice(order.total)}</td><td>${formatDate(order.created_at)}</td><td>${statusMarkup(order.status)}</td>
       <td>${order.status === "confirmed" ? `<button class="button-danger" type="button" data-action="cancel-order" data-id="${escapeHtml(order.id)}">Cancel</button>` : "—"}</td>
     </tr>`;
@@ -380,6 +388,7 @@ function inventoryRowsMarkup(items) {
       <td>${item.active ? '<span class="status-pill">Active</span>' : '<span class="status-pill neutral">Hidden</span>'}</td>
       <td><div class="table-actions">
         <form class="restock-form" data-id="${escapeHtml(item.id)}"><input class="field compact-field" aria-label="Stock adjustment for ${escapeHtml(item.name)}" name="delta" type="number" value="5" min="-${Math.max(0, Number(item.stock))}" max="100000" required><button class="button-secondary" type="submit">Adjust</button></form>
+        <button class="button-secondary" type="button" data-action="edit-item" data-id="${escapeHtml(item.id)}">Edit</button>
         <button class="${item.active ? "button-secondary" : "button"}" type="button" data-action="toggle-item" data-id="${escapeHtml(item.id)}" data-active="${String(item.active)}">${item.active ? "Hide" : "Publish"}</button>
       </div></td>
     </tr>`;
@@ -387,6 +396,7 @@ function inventoryRowsMarkup(items) {
 }
 async function renderInventory() {
   const items = await api("/items");
+  state.inventoryItems = items;
   return `<div class="section-heading"><div><h2>Inventory, in good order</h2><p>Add a new listing, adjust stock, or take an item off the board.</p></div></div>
     <div class="layout-two">
       <form id="create-item-form" class="panel form-panel">
@@ -410,7 +420,25 @@ async function renderInventory() {
       <section class="panel"><div class="panel-header"><div><h2>What you've got</h2><p>${items.length} item${items.length === 1 ? "" : "s"} in the inventory</p></div></div>
         <div class="table-wrap"><table class="data-table"><thead><tr><th>Item</th><th>Price</th><th>Stock</th><th>Status</th><th>Actions</th></tr></thead><tbody>${inventoryRowsMarkup(items)}</tbody></table></div>
       </section>
-    </div>`;
+    </div>
+    <dialog class="edit-dialog" id="edit-item-dialog" aria-labelledby="edit-item-title">
+      <form class="edit-dialog-form" id="edit-item-form">
+        <div class="dialog-heading"><div><h2 id="edit-item-title">Edit listing</h2><p>Keep this item's details up to date.</p></div><button class="icon-button" type="button" data-action="close-edit" aria-label="Close">×</button></div>
+        <input type="hidden" name="id">
+        <div class="form-grid">
+          <label class="span-2"><span class="field-label compact-label">Item name</span><input class="field compact-field" name="name" maxlength="150" required></label>
+          <label><span class="field-label compact-label">Price (₹)</span><input class="field compact-field" name="price" type="number" min="0" step="0.01" required></label>
+          <label><span class="field-label compact-label">Low-stock alert at</span><input class="field compact-field" name="low_stock_threshold" type="number" min="0" required></label>
+          <label><span class="field-label compact-label">Limit per buyer</span><input class="field compact-field" name="per_user_limit" type="number" min="1" placeholder="No limit"></label>
+          <label><span class="field-label compact-label">Event date</span><input class="field compact-field" name="event_date" type="datetime-local"></label>
+          <label class="span-2"><span class="field-label compact-label">Description</span><textarea class="field compact-field" name="description" maxlength="2000"></textarea></label>
+          <label><span class="field-label compact-label">Sale opens</span><input class="field compact-field" name="sale_starts_at" type="datetime-local"></label>
+          <label><span class="field-label compact-label">Sale closes</span><input class="field compact-field" name="sale_ends_at" type="datetime-local"></label>
+        </div>
+        <p id="edit-item-error" class="form-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="button-secondary" type="button" data-action="close-edit">Keep as is</button><button class="button" type="submit">Save changes</button></div>
+      </form>
+    </dialog>`;
 }
 function alertRowsMarkup(alerts) {
   if (!alerts.length) return emptyMarkup("All quiet on the stock front", "When an item gets low, we'll let you know right here.");
@@ -679,6 +707,59 @@ async function toggleItem(button) {
     button.disabled = false;
   }
 }
+function openEditItem(button) {
+  const item = state.inventoryItems.find(entry => entry.id === button.dataset.id);
+  if (!item) {
+    showToast("That item is no longer in the inventory. Refresh and try again.", "error");
+    return;
+  }
+  const dialog = document.getElementById("edit-item-dialog");
+  const form = document.getElementById("edit-item-form");
+  form.elements.id.value = item.id;
+  form.elements.name.value = item.name;
+  form.elements.description.value = item.description || "";
+  form.elements.price.value = item.price;
+  form.elements.low_stock_threshold.value = item.low_stock_threshold ?? 5;
+  form.elements.per_user_limit.value = item.per_user_limit ?? "";
+  form.elements.event_date.value = datetimeLocalValue(item.event_date);
+  form.elements.sale_starts_at.value = datetimeLocalValue(item.sale_starts_at);
+  form.elements.sale_ends_at.value = datetimeLocalValue(item.sale_ends_at);
+  document.getElementById("edit-item-error").hidden = true;
+  dialog.showModal();
+}
+async function updateItem(form) {
+  const button = form.querySelector('button[type="submit"]');
+  const errorBox = document.getElementById("edit-item-error");
+  const data = new FormData(form);
+  const body = {
+    name: data.get("name").trim(),
+    description: data.get("description").trim(),
+    price: Number(data.get("price")),
+    low_stock_threshold: Number(data.get("low_stock_threshold")),
+    per_user_limit: data.get("per_user_limit") ? Number(data.get("per_user_limit")) : null,
+    event_date: data.get("event_date") ? new Date(data.get("event_date")).toISOString() : null,
+    sale_starts_at: data.get("sale_starts_at") ? new Date(data.get("sale_starts_at")).toISOString() : null,
+    sale_ends_at: data.get("sale_ends_at") ? new Date(data.get("sale_ends_at")).toISOString() : null
+  };
+  errorBox.hidden = true;
+  button.disabled = true;
+  button.textContent = "Saving…";
+  try {
+    await api(`/items/${encodeURIComponent(data.get("id"))}`, {
+      method: "PATCH",
+      body: JSON.stringify(body)
+    });
+    document.getElementById("edit-item-dialog").close();
+    showToast("Listing updated.");
+    await renderRoute();
+  } catch (error) {
+    errorBox.textContent = describeError(error);
+    errorBox.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save changes";
+  }
+}
 async function acknowledgeAlert(button) {
   button.disabled = true;
   try {
@@ -738,6 +819,8 @@ document.addEventListener("click", event => {
   if (action === "buy") buyItem(button.dataset.id, button);
   if (action === "cancel-order") cancelOrder(button.dataset.id, button);
   if (action === "toggle-item") toggleItem(button);
+  if (action === "edit-item") openEditItem(button);
+  if (action === "close-edit") document.getElementById("edit-item-dialog")?.close();
   if (action === "ack-alert") acknowledgeAlert(button);
 });
 document.addEventListener("submit", event => {
@@ -751,6 +834,9 @@ document.addEventListener("submit", event => {
   } else if (form.id === "create-item-form") {
     event.preventDefault();
     createItem(form);
+  } else if (form.id === "edit-item-form") {
+    event.preventDefault();
+    updateItem(form);
   } else if (form.id === "ticket-checkin-form") {
     event.preventDefault();
     checkInTicket(form);
