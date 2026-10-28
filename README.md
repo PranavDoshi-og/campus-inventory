@@ -1,0 +1,74 @@
+# Campus Merchandise & Event Inventory Tracker
+
+FastAPI + MongoDB (Motor) backend for student-association merch and event tickets, with
+flash-sale-safe ordering, low-stock alerts, live WebSocket updates and role separation.
+
+## Run it
+
+```bash
+docker compose up --build          # API on http://localhost:8000, docs at /docs
+# or locally (needs a MongoDB on localhost:27017):
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Open `http://localhost:8000/` for the live board, `/docs` for the Swagger UI.
+
+Prove the concurrency handling (60 buyers, 10 units):
+
+```bash
+python scripts/flash_sale_test.py
+```
+
+## Roles
+
+| Capability                               | Buyer | Organizer |
+|------------------------------------------|:-----:|:---------:|
+| Browse active items, WebSocket stock feed|  ✅   |    ✅     |
+| Place / cancel own orders                |  ✅   |           |
+| Create / edit / restock items            |       |    ✅     |
+| View all orders, reports, alerts         |       |    ✅     |
+| Cancel any order                         |       |    ✅     |
+
+`POST /auth/register` creates a **buyer**. Supplying `organizer_code` equal to
+`ORGANIZER_INVITE_CODE` creates an **organizer** (committee members get the code).
+
+## How concurrency is handled
+
+No locks, no replica set needed — everything rests on MongoDB's single-document atomicity:
+
+1. **Stock reservation** – one `find_one_and_update({_id, stock: {$gte: qty}}, {$inc: {stock: -qty}})`.
+   The check and decrement are a single atomic op, so stock can't go negative however many requests race.
+2. **Per-buyer limit** – a `purchase_counters` doc claimed with a conditional upsert
+   (`qty <= limit - n`); a failed condition surfaces as `DuplicateKeyError` → 409.
+3. **Compensation** – if a later step fails, earlier claims are rolled back.
+4. **Cancel** – atomic `confirmed → cancelled` transition so a double-cancel can't restore stock twice.
+
+Multi-item carts would need Mongo transactions (replica set); this design keeps one item per order.
+
+## Inventory alerts
+
+After each stock change, an alert (`low_stock` / `sold_out`) is stored in `alerts` **only when that
+change crosses the threshold** (`previous > threshold >= new`), so exactly one alert fires even under
+a race. Organizers receive it instantly over WebSocket and can list/acknowledge via `/alerts`.
+
+## Real-time
+
+`ws://host/ws?token=<JWT>` — all users get `stock_update`; organizers also get `alert`.
+The hub is in-process; for multiple workers use Redis pub/sub or Mongo change streams.
+
+## Endpoints (summary)
+
+```
+POST /auth/register  /auth/login   GET /auth/me
+GET  /items  /items/{id}           POST /items            PATCH /items/{id}   POST /items/{id}/restock
+POST /orders          GET /orders/me (buyer)   GET /orders (organizer)   POST /orders/{id}/cancel
+GET  /alerts          POST /alerts/{id}/ack    GET /reports/summary
+WS   /ws
+```
+
+## Next steps
+
+Integer minor-unit pricing (paise/cents), payment gateway webhook with order `pending` state + reservation
+expiry (TTL index), ticket check-in endpoint, rate limiting, refresh tokens, pytest suite.
