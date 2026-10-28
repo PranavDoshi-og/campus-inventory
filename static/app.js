@@ -288,11 +288,15 @@ function statusMarkup(status) {
 function productMarkup(item) {
   const stock = itemStock(item);
   const canBuy = state.user?.role === "buyer" && item.active !== false && Number(item.stock) > 0;
+  const eventDate = item.kind === "ticket" && item.event_date
+    ? `<p class="event-date">Event · ${escapeHtml(formatDate(item.event_date, { dateStyle: "medium", timeStyle: "short" }))}</p>`
+    : "";
   return `<article class="product">
     <div class="product-art">${ICONS[item.kind === "ticket" ? "ticket" : "merch"]}<span class="product-kind">${item.kind === "ticket" ? "Event ticket" : "Campus merch"}</span></div>
     <div class="product-body">
       <div class="product-top"><div><h3>${escapeHtml(item.name)}</h3><span class="sku">${escapeHtml(item.sku)}</span></div><span class="price">${formatPrice(item.price)}</span></div>
       ${item.description ? `<p class="description">${escapeHtml(item.description)}</p>` : ""}
+      ${eventDate}
       <div class="product-bottom"><span class="stock ${stock.className}">${escapeHtml(stock.text)}</span>
         ${canBuy ? `<button class="button" type="button" data-action="buy" data-id="${escapeHtml(item.id)}">Get one</button>` : ""}
       </div>
@@ -343,12 +347,17 @@ async function renderShop() {
 }
 function orderRowsMarkup(orders, organizer = false) {
   if (!orders.length) return `<tr><td colspan="${organizer ? 7 : 6}" class="table-empty">No orders here yet. The next good thing is just around the corner.</td></tr>`;
-  return orders.map(order => `<tr>
-    <td><span class="cell-title">${escapeHtml(order.item_name)}</span><span class="cell-subtitle">${escapeHtml(order.sku)}</span></td>
-    ${organizer ? `<td><span class="cell-title">${escapeHtml(order.buyer_id)}</span><span class="cell-subtitle">Buyer ID</span></td>` : ""}
-    <td>${escapeHtml(order.quantity)}</td><td>${formatPrice(order.total)}</td><td>${formatDate(order.created_at)}</td><td>${statusMarkup(order.status)}</td>
-    <td>${order.status === "confirmed" ? `<button class="button-danger" type="button" data-action="cancel-order" data-id="${escapeHtml(order.id)}">Cancel</button>` : "—"}</td>
-  </tr>`).join("");
+  return orders.map(order => {
+    const ticketCodes = !organizer && order.kind === "ticket" && Array.isArray(order.ticket_codes) && order.ticket_codes.length
+      ? `<span class="ticket-codes-label">Your ticket${order.ticket_codes.length === 1 ? "" : "s"}</span><span class="ticket-codes">${order.ticket_codes.map(code => `<code>${escapeHtml(code)}</code>`).join("")}</span>`
+      : "";
+    return `<tr>
+      <td><span class="cell-title">${escapeHtml(order.item_name)}</span><span class="cell-subtitle">${escapeHtml(order.sku)}</span>${ticketCodes}</td>
+      ${organizer ? `<td><span class="cell-title">${escapeHtml(order.buyer_id)}</span><span class="cell-subtitle">Buyer ID</span></td>` : ""}
+      <td>${escapeHtml(order.quantity)}</td><td>${formatPrice(order.total)}</td><td>${formatDate(order.created_at)}</td><td>${statusMarkup(order.status)}</td>
+      <td>${order.status === "confirmed" ? `<button class="button-danger" type="button" data-action="cancel-order" data-id="${escapeHtml(order.id)}">Cancel</button>` : "—"}</td>
+    </tr>`;
+  }).join("");
 }
 async function renderOrders(organizer = false) {
   const orders = await api(organizer ? "/orders" : "/orders/me");
@@ -389,6 +398,8 @@ async function renderInventory() {
           <label><span class="field-label compact-label">Limit per buyer</span><input class="field compact-field" name="per_user_limit" type="number" min="1" placeholder="No limit"></label>
           <label class="span-2"><span class="field-label compact-label">Description</span><textarea class="field compact-field" name="description" maxlength="2000" placeholder="A short note about this item"></textarea></label>
           <label class="span-2"><span class="field-label compact-label">Event date <span class="muted">(for tickets)</span></span><input class="field compact-field" name="event_date" type="datetime-local"></label>
+          <label><span class="field-label compact-label">Sale opens <span class="muted">(optional)</span></span><input class="field compact-field" name="sale_starts_at" type="datetime-local"></label>
+          <label><span class="field-label compact-label">Sale closes <span class="muted">(optional)</span></span><input class="field compact-field" name="sale_ends_at" type="datetime-local"></label>
         </div>
         <p id="item-form-error" class="form-error" role="alert" hidden></p>
         <button class="button button-block" type="submit">Publish item</button>
@@ -601,6 +612,10 @@ async function createItem(form) {
   if (limit) body.per_user_limit = Number(limit);
   const eventDate = data.get("event_date");
   if (eventDate) body.event_date = new Date(eventDate).toISOString();
+  const saleStartsAt = data.get("sale_starts_at");
+  if (saleStartsAt) body.sale_starts_at = new Date(saleStartsAt).toISOString();
+  const saleEndsAt = data.get("sale_ends_at");
+  if (saleEndsAt) body.sale_ends_at = new Date(saleEndsAt).toISOString();
   try {
     await api("/items", { method: "POST", body: JSON.stringify(body) });
     showToast("Your new item is on the board.");

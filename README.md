@@ -1,7 +1,15 @@
 # Campus Merchandise & Event Inventory Tracker
 
-FastAPI + MongoDB (Motor) backend for student-association merch and event tickets, with
-flash-sale-safe ordering, low-stock alerts, live WebSocket updates and role separation.
+A real-time tracking application for student-association merchandise logistics
+and event ticketing. Buyers can browse merchandise and events, purchase stock-safe
+orders, retrieve their ticket codes, and track their orders. Committee organizers
+can manage listings and sale windows, adjust inventory, monitor alerts, and view
+sales reports.
+
+The FastAPI and MongoDB application uses atomic stock reservations and per-buyer
+purchase limits to handle concurrent flash-sale orders. Live WebSocket updates
+keep buyers informed about stock changes and notify organizers when inventory
+crosses an alert threshold. Buyer and organizer roles have distinct permissions.
 
 ## Run it
 
