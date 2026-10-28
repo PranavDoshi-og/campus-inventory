@@ -24,6 +24,10 @@ Sign up from `/register` or `POST /auth/register`. Organizer accounts require
 the invite code configured with `ORGANIZER_INVITE_CODE`. Sign-in lasts for the
 current browser tab; signing out clears the session token.
 
+To add fictional campus merch and event listings to MongoDB, run
+`python scripts/seed_inventory.py`. The seed is safe to rerun: existing sample
+SKUs are left unchanged.
+
 Prove the concurrency handling (60 buyers, 10 units):
 
 ```bash
