@@ -13,7 +13,16 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Open `http://localhost:8000/` for the live board, `/docs` for the Swagger UI.
+Open `http://localhost:8000/` for the app and `/docs` for the Swagger UI. The
+frontend supports direct links and browser history for `/login`, `/register`,
+`/shop`, `/my-orders`, `/organizer`, `/organizer/inventory`,
+`/organizer/orders`, `/organizer/alerts`, and `/organizer/reports`. The
+`/my-orders` page avoids colliding with the existing `/orders` API endpoint.
+Pages are role-gated in the frontend and protected again by the API.
+
+Sign up from `/register` or `POST /auth/register`. Organizer accounts require
+the invite code configured with `ORGANIZER_INVITE_CODE`. Sign-in lasts for the
+current browser tab; signing out clears the session token.
 
 Prove the concurrency handling (60 buyers, 10 units):
 
