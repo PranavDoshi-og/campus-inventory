@@ -19,6 +19,26 @@ class RegisterIn(BaseModel):
     organizer_code: str | None = None  # valid code => organizer, otherwise buyer
 
 
+class ProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    password: str | None = Field(default=None, min_length=8)
+    organizer_code: str | None = None
+
+
+class UserCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    password: str = Field(min_length=8)
+    role: Literal["buyer", "organizer"] = "buyer"
+
+
+class UserUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    email: EmailStr | None = None
+    role: Literal["buyer", "organizer"] | None = None
+    password: str | None = Field(default=None, min_length=8)
+
+
 class ItemCreate(BaseModel):
     sku: str = Field(min_length=1, max_length=50)
     name: str = Field(min_length=1, max_length=200)
@@ -70,5 +90,33 @@ class OrderIn(BaseModel):
     quantity: int = Field(default=1, ge=1, le=20)
 
 
+class BatchOrderItem(BaseModel):
+    item_id: str
+    quantity: int = Field(default=1, ge=1, le=20)
+
+
+class BatchOrderIn(BaseModel):
+    items: list[BatchOrderItem] = Field(min_length=1, max_length=20)
+
+
+class OrderUpdate(BaseModel):
+    status: Literal["confirmed", "cancelled"]
+
+
 class TicketCheckInIn(BaseModel):
     ticket_code: str = Field(min_length=8, max_length=8, pattern=r"^[A-Fa-f0-9]{8}$")
+
+
+class AlertCreate(BaseModel):
+    item_id: str
+    type: Literal["low_stock", "sold_out"]
+    stock: int = Field(ge=0)
+    threshold: int = Field(default=5, ge=0)
+
+
+class AlertUpdate(BaseModel):
+    acknowledged: bool
+
+
+class SqlQueryIn(BaseModel):
+    query: str = Field(min_length=5, max_length=2000)

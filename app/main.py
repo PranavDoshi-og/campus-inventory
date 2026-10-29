@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import database
-from .routers import alerts, auth, items, orders, reports, ws
+from .routers import alerts, auth, items, orders, reports, users, ws
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 FRONTEND_ROUTES = {
@@ -23,6 +23,7 @@ FRONTEND_ROUTES = {
     "/organizer/alerts",
     "/organizer/reports",
     "/organizer/database",
+    "/organizer/users",
 }
 
 
@@ -35,7 +36,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Campus Merchandise & Event Inventory Tracker", lifespan=lifespan)
 
-for r in (auth, items, orders, alerts, reports, ws):
+for r in (auth, users, items, orders, alerts, reports, ws):
     app.include_router(r.router)
 
 

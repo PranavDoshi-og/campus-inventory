@@ -122,6 +122,87 @@ async def place_order(item_id: str, user: dict, qty: int) -> dict:
     return order_data
 
 
+async def place_orders_batch(items_input: list[dict], user: dict) -> list[dict]:
+    consolidated: dict[str, int] = {}
+    for entry in items_input:
+        iid = str(entry["item_id"])
+        consolidated[iid] = consolidated.get(iid, 0) + int(entry["quantity"])
+
+    now = utcnow()
+    orders_data = []
+    broadcast_actions = []
+
+    async with database.SessionLocal() as session:
+        async with session.begin():
+            await session.execute(text("BEGIN IMMEDIATE"))
+            for item_id, qty in consolidated.items():
+                item = await session.get(Item, item_id)
+                if not item or not item.active:
+                    raise HTTPException(404, f"Item not available")
+                if item.sale_starts_at and now < item.sale_starts_at:
+                    raise HTTPException(409, f"Sale for '{item.name}' has not started yet")
+                if item.sale_ends_at and now > item.sale_ends_at:
+                    raise HTTPException(409, f"Sale for '{item.name}' has ended")
+
+                if item.per_user_limit is not None:
+                    if qty > item.per_user_limit:
+                        raise HTTPException(409, f"Limit is {item.per_user_limit} per buyer for '{item.name}'")
+                    claim = sqlite_insert(PurchaseCounter).values(
+                        item_id=item_id, buyer_id=user["id"], quantity=qty
+                    )
+                    claim = claim.on_conflict_do_update(
+                        index_elements=["item_id", "buyer_id"],
+                        set_={"quantity": PurchaseCounter.quantity + qty},
+                        where=PurchaseCounter.quantity + qty <= item.per_user_limit,
+                    )
+                    result = await session.execute(claim)
+                    if result.rowcount != 1:
+                        raise HTTPException(409, f"Limit of {item.per_user_limit} per buyer reached for '{item.name}'")
+
+                previous_stock = item.stock
+                reservation = await session.execute(
+                    update(Item)
+                    .where(Item.id == item_id, Item.active.is_(True), Item.stock >= qty)
+                    .values(stock=Item.stock - qty, sold=Item.sold + qty)
+                )
+                if reservation.rowcount != 1:
+                    raise HTTPException(409, f"Insufficient stock for '{item.name}'")
+                await session.refresh(item)
+
+                unit_price = Decimal(item.price)
+                order = Order(
+                    buyer_id=user["id"],
+                    item_id=item.id,
+                    sku=item.sku,
+                    item_name=item.name,
+                    kind=item.kind,
+                    quantity=qty,
+                    unit_price=unit_price,
+                    total=unit_price * qty,
+                    status="confirmed",
+                    created_at=now,
+                )
+                session.add(order)
+                await session.flush()
+                codes = []
+                if item.kind == "ticket":
+                    codes = [secrets.token_hex(4).upper() for _ in range(qty)]
+                    session.add_all(
+                        [TicketCode(code=code, order_id=order.id) for code in codes]
+                    )
+                alert = await _record_stock_alert(session, item, previous_stock)
+                order_data = ser(order)
+                order_data["ticket_codes"] = codes
+                order_data["used_ticket_codes"] = []
+                orders_data.append(order_data)
+                broadcast_actions.append((item, alert))
+
+    for item, alert in broadcast_actions:
+        await _broadcast_stock_change(item, alert)
+
+    return orders_data
+
+
 async def cancel_order(order_id: str, user: dict) -> dict:
     alert = None
     async with database.SessionLocal() as session:
