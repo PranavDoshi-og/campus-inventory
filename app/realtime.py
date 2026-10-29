@@ -1,7 +1,7 @@
 """In-memory WebSocket hub.
 
 Works for a single process. For multiple workers/instances, publish events via
-Redis pub/sub or MongoDB change streams and fan out from there.
+Redis pub/sub or a shared database-backed event bus and fan out from there.
 """
 from fastapi import WebSocket
 

@@ -1,22 +1,21 @@
-"""Business logic: atomic order placement, cancellation, and stock alerts."""
+"""Transactional order, ticket, and stock-alert workflows."""
 import secrets
+from decimal import Decimal
 
 from fastapi import HTTPException
-from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from sqlalchemy import select, text, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from . import database
+from .models import Alert, Item, Order, PurchaseCounter, TicketCode
 from .realtime import manager
 from .utils import ser, utcnow
 
 
-# --------------------------------------------------------------------------- #
-# Real-time + alerts
-# --------------------------------------------------------------------------- #
 async def emit_stock_update(item: dict) -> None:
     await manager.broadcast({
         "type": "stock_update",
-        "item_id": str(item["_id"]),
+        "item_id": str(item["id"]),
         "sku": item["sku"],
         "stock": item["stock"],
         "sold": item.get("sold", 0),
@@ -24,168 +23,195 @@ async def emit_stock_update(item: dict) -> None:
     })
 
 
-async def check_stock_alerts(item: dict, previous_stock: int) -> None:
-    """Fire an alert exactly once per threshold crossing.
-
-    Every atomic decrement returns a unique post-update stock value, so only
-    the one request that moves stock across the threshold sees prev > thr >= new,
-    even when hundreds of orders race.
-    """
-    new, thr = item["stock"], item.get("low_stock_threshold", 0)
-    kind = None
-    if new == 0 and previous_stock > 0:
-        kind = "sold_out"
-    elif previous_stock > thr >= new:
-        kind = "low_stock"
-    if not kind:
-        return
-    alert = {
-        "type": kind,
-        "item_id": item["_id"],
-        "sku": item["sku"],
-        "item_name": item["name"],
-        "stock": new,
-        "threshold": thr,
-        "acknowledged": False,
-        "created_at": utcnow(),
-    }
-    res = await database.db.alerts.insert_one(alert)
-    alert["_id"] = res.inserted_id
-    await manager.broadcast({"type": "alert", "alert": ser(alert)}, roles={"organizer"})
+async def _record_stock_alert(session, item: Item, previous_stock: int) -> dict | None:
+    stock, threshold = item.stock, item.low_stock_threshold
+    alert_type = None
+    if stock == 0 and previous_stock > 0:
+        alert_type = "sold_out"
+    elif previous_stock > threshold >= stock:
+        alert_type = "low_stock"
+    if not alert_type:
+        return None
+    alert = Alert(
+        item_id=item.id,
+        sku=item.sku,
+        item_name=item.name,
+        type=alert_type,
+        stock=stock,
+        threshold=threshold,
+        acknowledged=False,
+        created_at=utcnow(),
+    )
+    session.add(alert)
+    await session.flush()
+    return ser(alert)
 
 
-# --------------------------------------------------------------------------- #
-# Orders
-# --------------------------------------------------------------------------- #
-async def place_order(item_id, user: dict, qty: int) -> dict:
-    db = database.db
+async def _broadcast_stock_change(item: Item, alert: dict | None) -> None:
+    await emit_stock_update(ser(item))
+    if alert:
+        await manager.broadcast({"type": "alert", "alert": alert}, roles={"organizer"})
+
+
+async def place_order(item_id: str, user: dict, qty: int) -> dict:
     now = utcnow()
-    item = await db.items.find_one({"_id": item_id})
-    if not item or not item["active"]:
-        raise HTTPException(404, "Item not available")
-    if item.get("sale_starts_at") and now < item["sale_starts_at"]:
-        raise HTTPException(409, "Sale has not started yet")
-    if item.get("sale_ends_at") and now > item["sale_ends_at"]:
-        raise HTTPException(409, "Sale has ended")
+    alert = None
+    async with database.SessionLocal() as session:
+        async with session.begin():
+            await session.execute(text("BEGIN IMMEDIATE"))
+            item = await session.get(Item, item_id)
+            if not item or not item.active:
+                raise HTTPException(404, "Item not available")
+            if item.sale_starts_at and now < item.sale_starts_at:
+                raise HTTPException(409, "Sale has not started yet")
+            if item.sale_ends_at and now > item.sale_ends_at:
+                raise HTTPException(409, "Sale has ended")
 
-    # Step 1 - per-buyer limit, claimed atomically (blocks double-tap / bot bursts).
-    limit = item.get("per_user_limit")
-    counter_id = f"{item_id}:{user['_id']}"
-    if limit:
-        if qty > limit:
-            raise HTTPException(409, f"Limit is {limit} per buyer")
-        try:
-            # Matches only if qty + new qty <= limit. If the doc exists but the
-            # condition fails, upsert tries to insert the same _id -> DuplicateKeyError.
-            await db.purchase_counters.update_one(
-                {"_id": counter_id, "qty": {"$lte": limit - qty}},
-                {"$inc": {"qty": qty}},
-                upsert=True,
+            if item.per_user_limit is not None:
+                if qty > item.per_user_limit:
+                    raise HTTPException(409, f"Limit is {item.per_user_limit} per buyer")
+                claim = sqlite_insert(PurchaseCounter).values(
+                    item_id=item_id, buyer_id=user["id"], quantity=qty
+                )
+                claim = claim.on_conflict_do_update(
+                    index_elements=["item_id", "buyer_id"],
+                    set_={"quantity": PurchaseCounter.quantity + qty},
+                    where=PurchaseCounter.quantity + qty <= item.per_user_limit,
+                )
+                result = await session.execute(claim)
+                if result.rowcount != 1:
+                    raise HTTPException(409, f"Limit of {item.per_user_limit} per buyer reached")
+
+            previous_stock = item.stock
+            reservation = await session.execute(
+                update(Item)
+                .where(Item.id == item_id, Item.active.is_(True), Item.stock >= qty)
+                .values(stock=Item.stock - qty, sold=Item.sold + qty)
             )
-        except DuplicateKeyError:
-            raise HTTPException(409, f"Limit of {limit} per buyer reached")
+            if reservation.rowcount != 1:
+                raise HTTPException(409, "Insufficient stock")
+            await session.refresh(item)
 
-    # Step 2 - reserve stock. The filter and the decrement are ONE atomic
-    # MongoDB operation, so stock can never go negative and no lock is needed.
-    updated = await db.items.find_one_and_update(
-        {"_id": item_id, "active": True, "stock": {"$gte": qty}},
-        {"$inc": {"stock": -qty, "sold": qty}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if not updated:
-        if limit:  # roll back the limit claim
-            await db.purchase_counters.update_one({"_id": counter_id}, {"$inc": {"qty": -qty}})
-        raise HTTPException(409, "Insufficient stock")
+            unit_price = Decimal(item.price)
+            order = Order(
+                buyer_id=user["id"],
+                item_id=item.id,
+                sku=item.sku,
+                item_name=item.name,
+                kind=item.kind,
+                quantity=qty,
+                unit_price=unit_price,
+                total=unit_price * qty,
+                status="confirmed",
+                created_at=now,
+            )
+            session.add(order)
+            await session.flush()
+            codes = []
+            if item.kind == "ticket":
+                codes = [secrets.token_hex(4).upper() for _ in range(qty)]
+                session.add_all(
+                    [TicketCode(code=code, order_id=order.id) for code in codes]
+                )
+            alert = await _record_stock_alert(session, item, previous_stock)
+            order_data = ser(order)
+            order_data["ticket_codes"] = codes
+            order_data["used_ticket_codes"] = []
 
-    # Step 3 - record the order; compensate if that fails.
-    order = {
-        "item_id": item_id,
-        "sku": updated["sku"],
-        "item_name": updated["name"],
-        "kind": updated["kind"],
-        "buyer_id": user["_id"],
-        "quantity": qty,
-        "unit_price": updated["price"],
-        "total": round(updated["price"] * qty, 2),
-        "status": "confirmed",
-        "created_at": now,
-    }
-    if updated["kind"] == "ticket":
-        order["ticket_codes"] = [secrets.token_hex(4).upper() for _ in range(qty)]
-    try:
-        res = await db.orders.insert_one(order)
-    except Exception:
-        await db.items.update_one({"_id": item_id}, {"$inc": {"stock": qty, "sold": -qty}})
-        if limit:
-            await db.purchase_counters.update_one({"_id": counter_id}, {"$inc": {"qty": -qty}})
-        raise HTTPException(500, "Could not record order; stock restored")
-    order["_id"] = res.inserted_id
-
-    await emit_stock_update(updated)
-    await check_stock_alerts(updated, previous_stock=updated["stock"] + qty)
-    return order
+    await _broadcast_stock_change(item, alert)
+    return order_data
 
 
-async def cancel_order(order_id, user: dict) -> dict:
-    db = database.db
-    filt = {
-        "_id": order_id,
-        "status": "confirmed",
-        "used_ticket_codes": {"$exists": False},
-    }
-    if user["role"] != "organizer":
-        filt["buyer_id"] = user["_id"]
-    # Atomic state transition: only one cancel can ever win.
-    order = await db.orders.find_one_and_update(
-        filt,
-        {"$set": {"status": "cancelled", "cancelled_at": utcnow()}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if not order:
-        raise HTTPException(404, "Order not found or not cancellable")
-    item = await db.items.find_one_and_update(
-        {"_id": order["item_id"]},
-        {"$inc": {"stock": order["quantity"], "sold": -order["quantity"]}},
-        return_document=ReturnDocument.AFTER,
-    )
-    await db.purchase_counters.update_one(
-        {"_id": f"{order['item_id']}:{order['buyer_id']}"}, {"$inc": {"qty": -order["quantity"]}}
-    )
-    if item:
-        await emit_stock_update(item)
-    return order
+async def cancel_order(order_id: str, user: dict) -> dict:
+    alert = None
+    async with database.SessionLocal() as session:
+        async with session.begin():
+            await session.execute(text("BEGIN IMMEDIATE"))
+            order = await session.get(Order, order_id)
+            if (
+                not order
+                or order.status != "confirmed"
+                or (user["role"] != "organizer" and order.buyer_id != user["id"])
+            ):
+                raise HTTPException(404, "Order not found or not cancellable")
+            used_ticket = await session.scalar(
+                select(TicketCode.code).where(
+                    TicketCode.order_id == order.id,
+                    TicketCode.checked_in_at.is_not(None),
+                ).limit(1)
+            )
+            if used_ticket:
+                raise HTTPException(404, "Order not found or not cancellable")
+
+            transition = await session.execute(
+                update(Order)
+                .where(Order.id == order.id, Order.status == "confirmed")
+                .values(status="cancelled", cancelled_at=utcnow())
+            )
+            if transition.rowcount != 1:
+                raise HTTPException(404, "Order not found or not cancellable")
+
+            item = await session.get(Item, order.item_id)
+            previous_stock = item.stock
+            await session.execute(
+                update(Item)
+                .where(Item.id == item.id)
+                .values(stock=Item.stock + order.quantity, sold=Item.sold - order.quantity)
+            )
+            await session.refresh(item)
+            await session.execute(
+                update(PurchaseCounter)
+                .where(
+                    PurchaseCounter.item_id == order.item_id,
+                    PurchaseCounter.buyer_id == order.buyer_id,
+                    PurchaseCounter.quantity >= order.quantity,
+                )
+                .values(quantity=PurchaseCounter.quantity - order.quantity)
+            )
+            alert = await _record_stock_alert(session, item, previous_stock)
+            await session.refresh(order)
+            order_data = ser(order)
+            tickets = (
+                await session.scalars(
+                    select(TicketCode).where(TicketCode.order_id == order.id)
+                )
+            ).all()
+            order_data["ticket_codes"] = [ticket.code for ticket in tickets]
+            order_data["used_ticket_codes"] = [
+                ticket.code for ticket in tickets if ticket.checked_in_at is not None
+            ]
+
+    await _broadcast_stock_change(item, alert)
+    return order_data
 
 
 async def check_in_ticket(ticket_code: str) -> dict:
-    """Atomically redeem one confirmed ticket code exactly once."""
     now = utcnow()
-    order = await database.db.orders.find_one_and_update(
-        {
-            "ticket_codes": ticket_code,
-            "kind": "ticket",
-            "status": "confirmed",
-            "used_ticket_codes": {"$ne": ticket_code},
-        },
-        {
-            "$addToSet": {"used_ticket_codes": ticket_code},
-            "$set": {"last_checked_in_at": now},
-        },
-        return_document=ReturnDocument.AFTER,
-    )
-    if order:
-        return {
-            "checked_in": True,
-            "ticket_code": ticket_code,
-            "item_name": order["item_name"],
-            "order_id": str(order["_id"]),
-            "checked_in_at": now,
-        }
-
-    existing = await database.db.orders.find_one(
-        {"ticket_codes": ticket_code, "kind": "ticket"}
-    )
-    if not existing or existing.get("status") != "confirmed":
-        raise HTTPException(404, "Ticket code not found or order is not active")
-    if ticket_code in existing.get("used_ticket_codes", []):
-        raise HTTPException(409, "Ticket has already been checked in")
-    raise HTTPException(409, "Ticket could not be checked in; please try again")
+    async with database.SessionLocal() as session:
+        async with session.begin():
+            ticket = await session.get(TicketCode, ticket_code)
+            if not ticket:
+                raise HTTPException(404, "Ticket code not found or order is not active")
+            order = await session.get(Order, ticket.order_id)
+            if not order or order.status != "confirmed":
+                raise HTTPException(404, "Ticket code not found or order is not active")
+            if ticket.checked_in_at is not None:
+                raise HTTPException(409, "Ticket has already been checked in")
+            transition = await session.execute(
+                update(TicketCode)
+                .where(
+                    TicketCode.code == ticket_code,
+                    TicketCode.checked_in_at.is_(None),
+                )
+                .values(checked_in_at=now)
+            )
+            if transition.rowcount != 1:
+                raise HTTPException(409, "Ticket has already been checked in")
+            result = {
+                "checked_in": True,
+                "ticket_code": ticket_code,
+                "item_name": order.item_name,
+                "order_id": order.id,
+                "checked_in_at": now.isoformat(),
+            }
+    return result

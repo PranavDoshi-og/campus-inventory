@@ -11,7 +11,8 @@ const ROUTES = {
   "/organizer/orders": { title: "All orders", roles: ["organizer"] },
   "/organizer/check-in": { title: "Ticket check-in", roles: ["organizer"] },
   "/organizer/alerts": { title: "Stock alerts", roles: ["organizer"] },
-  "/organizer/reports": { title: "Reports", roles: ["organizer"] }
+  "/organizer/reports": { title: "Reports", roles: ["organizer"] },
+  "/organizer/database": { title: "Database lab", roles: ["organizer"] }
 };
 const BUYER_NAV = [
   ["/shop", "Discover", "grid"],
@@ -486,6 +487,93 @@ async function renderReports() {
       ${low.length ? low.map(item => `<tr><td>${escapeHtml(item.name)}</td><td>${escapeHtml(item.sku)}</td><td><span class="stock ${item.stock === 0 ? "out" : "low"}">${escapeHtml(item.stock)}</span></td></tr>`).join("") : '<tr><td colspan="3" class="table-empty">Everything is comfortably stocked. Nice work.</td></tr>'}
     </tbody></table></div></section>`;
 }
+function databaseCountMarkup(tables) {
+  const labels = {
+    users: "Users",
+    items: "Items",
+    orders: "Orders",
+    ticket_codes: "Ticket codes",
+    purchase_counters: "Purchase counters",
+    alerts: "Alerts"
+  };
+  return Object.entries(labels).map(([name, label]) => `<article class="dbms-metric">
+    <span>${label}</span><strong>${escapeHtml(tables[name] ?? 0)}</strong><code>${escapeHtml(name)}</code>
+  </article>`).join("");
+}
+function databaseBreakdownMarkup(rows) {
+  if (!rows.length) return '<p class="dbms-empty">No records yet.</p>';
+  return `<ul class="dbms-breakdown">${rows.map(row => `<li><span>${escapeHtml(row.name)}</span><strong>${escapeHtml(row.count)}</strong></li>`).join("")}</ul>`;
+}
+function databaseSchemaMarkup(tables) {
+  return tables.map(table => `<article class="dbms-entity">
+    <span class="dbms-entity-type">RELATIONAL TABLE · ${escapeHtml(table.constraints.length)} CONSTRAINTS</span>
+    <h3>${escapeHtml(table.name)}</h3>
+    <ul class="dbms-columns">${table.columns.map(column => `<li>
+      <code>${escapeHtml(column.name)}</code><span>${escapeHtml(column.type)}${column.nullable ? "" : " NOT NULL"}</span>
+      ${column.primary_key ? '<b>PK</b>' : column.foreign_key ? `<b>FK → ${escapeHtml(column.foreign_key)}</b>` : ""}
+    </li>`).join("")}</ul>
+    <p class="dbms-indexes"><strong>Constraints:</strong> ${table.constraints.map(escapeHtml).join(" · ")}</p>
+    <p class="dbms-indexes"><strong>Indexes:</strong> ${table.indexes.map(index => `${index.unique ? "UNIQUE " : ""}${escapeHtml(index.name)}`).join(" · ") || "Primary/unique keys"}</p>
+  </article>`).join("");
+}
+function databaseRelationshipsMarkup(rows) {
+  return `<ul class="dbms-relations">${rows.map(relation => `<li>
+    <strong>${escapeHtml(relation.from)} → ${escapeHtml(relation.to)}</strong>
+    <span>${escapeHtml(relation.cardinality)}</span>
+  </li>`).join("")}</ul>`;
+}
+async function renderDatabaseLab() {
+  const snapshot = await api("/reports/database");
+  return `<div class="section-heading"><div><h2>Relational database workbench</h2><p>A live view of the ${escapeHtml(snapshot.engine)} database powering the application.</p></div><span class="status-pill neutral">Updated ${escapeHtml(formatDate(snapshot.generated_at, { dateStyle: "medium", timeStyle: "short" }))}</span></div>
+    <section class="dbms-metrics" aria-label="Live relational table counts">${databaseCountMarkup(snapshot.tables)}</section>
+    <div class="section-heading"><div><h2>Live schema &amp; keys</h2><p>Physical tables, column types, nullability, primary keys, foreign keys, constraints, and indexes introspected from the application model.</p></div></div>
+    <section class="dbms-entities">${databaseSchemaMarkup(snapshot.schema)}</section>
+    <section class="dbms-grid">
+      <article class="panel dbms-panel"><div class="panel-header"><div><h2>ER relationships &amp; normalization</h2><p>One-to-many foreign keys and a composite primary key.</p></div></div>
+        <div class="dbms-copy">${databaseRelationshipsMarkup(snapshot.relationships)}
+        <p>Users, items, orders, and ticket codes are separate tables. Ticket codes are one row per ticket (atomic values); purchase counters use the composite key <code>(item_id, buyer_id)</code>. Orders retain the purchased SKU, name, and price as historical snapshots so later catalog edits cannot rewrite receipts.</p></div>
+      </article>
+      <article class="panel dbms-panel"><div class="panel-header"><div><h2>Live SQL groupings</h2><p>Executed GROUP BY queries on relational tables.</p></div></div>
+        <div class="dbms-breakdown-wrap"><h3>Orders by status</h3>${databaseBreakdownMarkup(snapshot.order_status || [])}
+          <h3>Items by kind</h3>${databaseBreakdownMarkup(snapshot.item_kinds || [])}</div>
+      </article>
+    </section>
+    <div class="section-heading"><div><h2>SQL queries &amp; views</h2><p>These are real relational patterns used by the app's reports and order listing.</p></div></div>
+    <section class="dbms-grid">
+      <article class="panel dbms-panel"><div class="panel-header"><div><h2>Joined report query</h2><p>Buyer, order, and current item joined by foreign keys.</p></div></div>
+        <pre class="dbms-code"><code>SELECT u.name, o.sku, o.quantity,
+       o.unit_price, o.total, o.status
+FROM orders AS o
+JOIN users AS u ON u.id = o.buyer_id
+JOIN items AS i ON i.id = o.item_id
+ORDER BY o.created_at DESC;</code></pre>
+      </article>
+      <article class="panel dbms-panel"><div class="panel-header"><div><h2>Aggregate view</h2><p><code>sales_by_item</code> is a real SQL view queried by the report route.</p></div></div>
+        <pre class="dbms-code"><code>CREATE VIEW sales_by_item AS
+SELECT sku, SUM(quantity) AS units,
+       SUM(total) AS revenue
+FROM orders
+WHERE status = 'confirmed'
+GROUP BY sku;
+
+SELECT * FROM sales_by_item
+ORDER BY revenue DESC;</code></pre>
+      </article>
+    </section>
+    <div class="section-heading"><div><h2>ACID transaction lab</h2><p>Order placement, stock reservation, ticket issuance, and threshold alerts commit or roll back together.</p></div></div>
+    <section class="dbms-grid">
+      <article class="dbms-note"><span class="status-pill">Implemented</span><h3>Atomic order transaction</h3><p>The service executes a conditional stock update, buyer-limit upsert, normalized order insert, one ticket-code row per ticket, and any stock-alert insert inside a single SQL transaction. A failure at any step rolls the full transaction back.</p>
+        <pre class="dbms-code"><code>BEGIN;
+UPDATE items
+SET stock = stock - :qty
+WHERE id = :item_id AND stock &gt;= :qty;
+INSERT INTO orders (...);
+INSERT INTO ticket_codes (...);
+COMMIT;</code></pre>
+      </article>
+      <article class="dbms-note future"><span class="status-pill neutral">DBMS concepts active</span><h3>Constraints, indexes &amp; recovery</h3><p>Foreign keys, unique email/SKU, CHECK constraints, composite primary keys, and query indexes are enforced by the database. SQLite persists to a local file; back it up and configure retention for recovery. PostgreSQL can be selected with a compatible async SQLAlchemy driver and database URL.</p></article>
+    </section>`;
+}
 async function renderOrganizerHome() {
   const [items, orders, report, alerts] = await Promise.all([
     api("/items"), api("/orders"), api("/reports/summary"), api("/alerts?unacknowledged=true")
@@ -509,6 +597,7 @@ async function renderOrganizerHome() {
       <a class="quick-card" href="/organizer/inventory" data-link><strong>Manage inventory</strong><span>Add, restock, or hide a listing.</span></a>
       <a class="quick-card" href="/organizer/alerts" data-link><strong>Check stock alerts</strong><span>${alerts.length} waiting for a look.</span></a>
       <a class="quick-card" href="/organizer/reports" data-link><strong>See how it's going</strong><span>Take a peek at sales and stock.</span></a>
+      <a class="quick-card" href="/organizer/database" data-link><strong>Explore the SQL database</strong><span>Inspect live tables, keys, constraints, indexes, and views.</span></a>
     </div>`;
 }
 async function routeContent(path) {
@@ -521,6 +610,7 @@ async function routeContent(path) {
     case "/organizer/check-in": return renderTicketCheckIn();
     case "/organizer/alerts": return renderAlerts();
     case "/organizer/reports": return renderReports();
+    case "/organizer/database": return renderDatabaseLab();
     default: throw new Error("That page isn't here.");
   }
 }

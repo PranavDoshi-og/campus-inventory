@@ -21,9 +21,9 @@ class RegisterIn(BaseModel):
 
 class ItemCreate(BaseModel):
     sku: str = Field(min_length=1, max_length=50)
-    name: str
+    name: str = Field(min_length=1, max_length=200)
     kind: Literal["merch", "ticket"] = "merch"
-    description: str = ""
+    description: str = Field(default="", max_length=2000)
     price: float = Field(ge=0)
     stock: int = Field(ge=0)
     low_stock_threshold: int = Field(default=5, ge=0)
@@ -42,8 +42,8 @@ class ItemCreate(BaseModel):
 
 
 class ItemUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
     price: float | None = Field(default=None, ge=0)
     low_stock_threshold: int | None = Field(default=None, ge=0)
     per_user_limit: int | None = Field(default=None, ge=1)

@@ -1,15 +1,11 @@
 services:
-  mongo:
-    image: mongo:7
-    ports: ["27017:27017"]
-    volumes: [mongo_data:/data/db]
   api:
     build: .
     ports: ["8000:8000"]
     environment:
-      MONGO_URL: mongodb://mongo:27017
+      DATABASE_URL: sqlite+aiosqlite:////srv/data/campus_inventory.db
       JWT_SECRET: dev-secret-change-me
       ORGANIZER_INVITE_CODE: committee-2026
-    depends_on: [mongo]
+    volumes: ["campus_data:/srv/data"]
 volumes:
-  mongo_data:
+  campus_data:

@@ -1,7 +1,6 @@
-"""Flash-sale stress test: 60 buyers race for 10 units.
+"""Race 60 buyers for 10 units and verify SQL transaction invariants.
 
-Expected: exactly 10 orders succeed, 50 get 409, final stock == 0, never negative.
-Usage:  python scripts/flash_sale_test.py [http://localhost:8000]
+Usage: python scripts/flash_sale_test.py [http://localhost:8000]
 """
 import asyncio
 import sys
@@ -15,37 +14,79 @@ STOCK, BUYERS = 10, 60
 
 
 async def token(client: httpx.AsyncClient, email: str, code: str | None = None) -> str:
-    await client.post("/auth/register", json={"name": email, "email": email, "password": "password123",
-                                              "organizer_code": code})
-    r = await client.post("/auth/login", data={"username": email, "password": "password123"})
-    return r.json()["access_token"]
+    response = await client.post(
+        "/auth/register",
+        json={
+            "name": email,
+            "email": email,
+            "password": "password123",
+            "organizer_code": code,
+        },
+    )
+    if response.status_code != 201:
+        raise RuntimeError(f"Could not register {email}: {response.status_code} {response.text}")
+    response = await client.post(
+        "/auth/login",
+        data={"username": email, "password": "password123"},
+    )
+    response.raise_for_status()
+    return response.json()["access_token"]
 
 
 async def main():
-    run = uuid.uuid4().hex[:6]
-    async with httpx.AsyncClient(base_url=BASE, timeout=30) as c:
-        org = await token(c, f"org-{run}@test.dev", ORGANIZER_CODE)
-        item = (await c.post("/items", headers={"Authorization": f"Bearer {org}"}, json={
-            "sku": f"HOODIE-{run}", "name": "Flash Hoodie", "price": 25, "stock": STOCK,
-            "low_stock_threshold": 3, "per_user_limit": 1})).json()
-        tokens = await asyncio.gather(*[token(c, f"b{i}-{run}@test.dev") for i in range(BUYERS)])
+    run = uuid.uuid4().hex[:8]
+    async with httpx.AsyncClient(base_url=BASE, timeout=60) as client:
+        organizer = await token(client, f"org-{run}@example.com", ORGANIZER_CODE)
+        item_response = await client.post(
+            "/items",
+            headers={"Authorization": f"Bearer {organizer}"},
+            json={
+                "sku": f"FLASH-{run}",
+                "name": "Flash Sale Test Item",
+                "price": 25,
+                "stock": STOCK,
+                "low_stock_threshold": 3,
+                "per_user_limit": 1,
+            },
+        )
+        item_response.raise_for_status()
+        item = item_response.json()
+        tokens = [
+            await token(client, f"buyer-{index}-{run}@example.com")
+            for index in range(BUYERS)
+        ]
 
-        async def buy(t):
-            r = await c.post("/orders", headers={"Authorization": f"Bearer {t}"},
-                             json={"item_id": item["id"], "quantity": 1})
-            return r.status_code
+        async def buy(access_token: str) -> int:
+            response = await client.post(
+                "/orders",
+                headers={"Authorization": f"Bearer {access_token}"},
+                json={"item_id": item["id"], "quantity": 1},
+            )
+            return response.status_code
 
-        codes = await asyncio.gather(*[buy(t) for t in tokens])
-        final = (await c.get(f"/items/{item['id']}", headers={"Authorization": f"Bearer {org}"})).json()
-        alerts = (await c.get("/alerts", headers={"Authorization": f"Bearer {org}"})).json()
-        mine = [a for a in alerts if a["item_id"] == item["id"]]
+        results = await asyncio.gather(*(buy(access_token) for access_token in tokens))
+        final_response = await client.get(
+            f"/items/{item['id']}",
+            headers={"Authorization": f"Bearer {organizer}"},
+        )
+        final_response.raise_for_status()
+        final = final_response.json()
+        alert_response = await client.get(
+            "/alerts",
+            headers={"Authorization": f"Bearer {organizer}"},
+        )
+        alert_response.raise_for_status()
+        alerts = [alert for alert in alert_response.json() if alert["item_id"] == item["id"]]
 
-    ok = codes.count(201)
-    print(f"succeeded={ok} rejected={codes.count(409)} final_stock={final['stock']} sold={final['sold']}")
-    print(f"alerts for item: {sorted(a['type'] for a in mine)}")
-    assert ok == STOCK and final["stock"] == 0 and final["sold"] == STOCK, "OVERSELL DETECTED"
-    assert sorted(a["type"] for a in mine) == ["low_stock", "sold_out"], "alert count wrong"
-    print("PASS: no overselling, alerts fired exactly once")
+    succeeded = results.count(201)
+    rejected = results.count(409)
+    print(f"succeeded={succeeded} rejected={rejected} stock={final['stock']} sold={final['sold']}")
+    print(f"alerts for item: {sorted(alert['type'] for alert in alerts)}")
+    assert succeeded == STOCK and rejected == BUYERS - STOCK
+    assert final["stock"] == 0 and final["sold"] == STOCK
+    assert sorted(alert["type"] for alert in alerts) == ["low_stock", "sold_out"]
+    print("PASS: no overselling, stock is consistent, and each threshold alert fired once")
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
